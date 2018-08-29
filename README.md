@@ -1,1 +1,2 @@
-# correlation_robustness
+# Purpose
+ENCODE-DCC RNA replicate reproducibility is measured calculating Spearman and Pearson correlation coefficients. However as pretty well explained in [this blog post](https://simplystatistics.org/2015/08/12/correlation-is-not-a-measure-of-reproducibility/) correlation does not necessarily mean concordance. For example it would be possible that both replicates would be completely uncorrelated except few highly expressed strongly correlated measurements and have high correlation numbers. In order to see if this is a problem for our data some data-analysis is needed.
