@@ -1,0 +1,29 @@
+{
+    "disable_existing_loggers": false,
+    "version": 1,
+    "formatters": {
+        "short": {
+            "format": "%(asctime)s|%(levelname)s|%(name)s: %(message)s"
+        }
+    },
+    "handlers": {
+        "console": {
+            "level": "INFO",
+            "formatter": "short",
+            "class": "logging.StreamHandler"
+        },
+        "file": {
+            "level": "WARNING",
+            "formatter": "short",
+            "class": "logging.FileHandler",
+            "filename": "correlation_robustness.log",
+            "mode": "a"
+        }
+    },
+    "loggers": {
+        "": {
+            "handlers": ["console", "file"],
+            "level": "INFO"
+        }
+    }
+}
