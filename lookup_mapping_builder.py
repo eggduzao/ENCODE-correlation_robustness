@@ -24,7 +24,7 @@ import requests
 from requests.exceptions import HTTPError
 import pandas as pd
 import numpy as np
-import scipy
+import scipy.stats
 import json
 import logging
 from logging.config import dictConfig
@@ -119,37 +119,52 @@ def build_file_to_experiment_data_mapping(experiment_data_dict):
     return file_to_experiment_mapping
 
 
-def get_min_quantile_value(dataframe1, dataframe2, column, quant):
+def get_min_quantile_value(series1, series2, quant):
     """Calculate minimum of quantile thresholds.
-    Given two pandas DataFrames, and a column that is present in both of them,
-    and a quantile, calculate threshold for both dataframes, and return the
+    Given two pandas Series, and a quantile, calculate threshold for both Series, and return the
     smaller one.
 
     Args:
-        dataframe1: Pandas DataFrame
-        dataframe2: Pandas DataFrame
-        column: String column name that is present in both input DataFrames
+        dataframe1: Pandas Series
+        dataframe2: Pandas Series
         quant: float percentile. For top 1% enter 0.99 etc.
 
     Returns:
         threshold: float
 
-    Raises:
-        KeyError if column is not present in either of the inputs.
     """
-    return min(
-        dataframe1[column].quantile(q=quant),
-        dataframe2[column].quantile(q=quant))
+    return min(series1.quantile(q=quant), series2.quantile(q=quant))
+
+
+def get_pearson(arr1, arr2):
+    """Calculate pearson correlation
+    """
+    return scipy.stats.pearsonr(arr1, arr2)[0]
+
+
+def get_spearman(arr1, arr2):
+    """Calculate spearman correlation
+    """
+    return scipy.stats.spearman(arr1, arr2)[0]
+
+
+def get_log2_mean(arr1, arr2):
+    """Calculate log2 mean
+    """
+    return (np.log2(arr1) + np.log2(arr2)) / 2.0
 
 
 def build_record_of_correlation_metrics_from_madqc_obj(
-        madqc_obj, file_to_experiment_mapping):
+        madqc_obj,
+        file_to_experiment_mapping,
+        base_url='https://www.encodeproject.org'):
     """Take one madqc dict, and calculate correlation metric dict.
 
     Args:
-        madqc_obj: dict containing a madQC object
+        madqc_obj: dict containing a madQC object,
         file_to_experiment_mapping: dict built by
-            build_file_to_experiment_data_mapping.
+            build_file_to_experiment_data_mapping.,
+        base_url
 
     Returns:
         Dict with following structure:
@@ -203,6 +218,58 @@ def build_record_of_correlation_metrics_from_madqc_obj(
         'experiment_accession']
     correlation_record['replication_type'] = file1_meta['replication_type']
     correlation_record['biosample_type'] = file1_meta['biosample_type']
+    # that is all that can be done 'offline', get the actual files now.
+    quants1 = pd.read_csv(
+        base_url + madqc_obj['quality_metric_of'][0] + '@@download', sep='\t')
+    quants2 = pd.read_csv(
+        base_url + madqc_obj['quality_metric_of'][1] + '@@download', sep='\t')
+    # calculate filters for various conditions
+    fpkm1 = quants1['FPKM']
+    fpkm2 = quants2['FPKM']
+    del quants1
+    del quants2
+    neitherzero = (fpkm1 != 0) & (fpkm2 != 0)
+    fpkm_gt_1 = (fpkm1 > 1) & (fpkm2 > 1)
+    correlation_record['FPKM_gt_1_pearson'] = get_pearson(
+        np.log2(fpkm1[fpkm_gt_1]), np.log2(fpkm2[fpkm_gt_1]))
+    correlation_record['FPKM_gt_1_spearman'] = get_spearman(
+        np.log2(fpkm1[fpkm_gt_1]), np.log2(fpkm2[fpkm_gt_1]))
+    fpkm1_log2 = np.log2(fpkm1[neitherzero])
+    fpkm2_log2 = np.log2(fpkm2[neitherzero])
+    log2_mean = (fpkm1_log2 + fpkm2_log2) / 2.0
+    # check with Seth if he wants AND or OR for quantiles
+    quantile_01 = get_min_quantile_value(fpkm1_log2, fpkm2_log2, 0.999)
+    quantile_1 = get_min_quantile_value(fpkm1_log2, fpkm2_log2, 0.99)
+    quantile_10 = get_min_quantile_value(fpkm1_log2, fpkm2_log2, 0.9)
+    quantile_01_condition = (fpkm1_log2 > quantile_01) | (fpkm2_log2 >
+                                                          quantile_01)
+    quantile_1_condition = (fpkm1_log2 > quantile_1) | (fpkm2_log2 >
+                                                        quantile_1)
+    quantile_10_condition = (fpkm1_log2 > quantile_10) | (fpkm2_log2 >
+                                                          quantile_10)
+    log2_mean_gt_0 = log2_mean > 0
+    correlation_record['FPKM_log2_mean_gt_0_pearson'] = get_pearson(
+        fpkm1_log2[log2_mean_gt_0], fpkm2_log2[log2_mean_gt_0])
+    correlation_record['FPKM_log2_mean_gt_0_spearman'] = get_spearman(
+        fpkm1_log2[log2_mean_gt_0], fpkm2_log2[log2_mean_gt_0])
+    correlation_record['FPKM_log2_mean_gt_0_pearson_01_pct'] = get_pearson(
+        fpkm1_log2[log2_mean_gt_0 & quantile_01_condition],
+        fpkm2_log2[log2_mean_gt_0 & quantile_01_condition])
+    correlation_record['FPKM_log2_mean_gt_0_spearman_01_pct'] = get_spearman(
+        fpkm1_log2[log2_mean_gt_0 & quantile_01_condition],
+        fpkm2_log2[log2_mean_gt_0 & quantile_01_condition])
+    correlation_record['FPKM_log2_mean_gt_0_pearson_1_pct'] = get_pearson(
+        fpkm1_log2[log2_mean_gt_0 & quantile_1_condition],
+        fpkm2_log2[log2_mean_gt_0 & quantile_1_condition])
+    correlation_record['FPKM_log2_mean_gt_0_spearman_1_pct'] = get_spearman(
+        fpkm1_log2[log2_mean_gt_0 & quantile_1_condition],
+        fpkm2_log2[log2_mean_gt_0 & quantile_1_condition])
+    correlation_record['FPKM_log2_mean_gt_0_pearson_10_pct'] = get_pearson(
+        fpkm1_log2[log2_mean_gt_0 & quantile_10_condition],
+        fpkm2_log2[log2_mean_gt_0 & quantile_10_condition])
+    correlation_record['FPKM_log2_mean_gt_0_spearman_10_pct'] = get_spearman(
+        fpkm1_log2[log2_mean_gt_0 & quantile_10_condition],
+        fpkm2_log2[log2_mean_gt_0 & quantile_10_condition])
     return correlation_record
 
 
