@@ -29,18 +29,22 @@ import json
 import logging
 from logging.config import dictConfig
 import time
+import threading
+import sys
 
 ENCODE_BASE_URL = 'https://www.encodeproject.org'
 MAD_SEARCH_URL = ('/search/?type=MadQualityMetric'
-                  '&status=released&assay_term_name=RNA-seq'
+                  '&status=released'
+                  '&assay_term_name=RNA-seq'
                   '&assay_term_name=shRNA+knockdown+followed+by+RNA-seq'
                   '&assay_term_name=CRISPRi+followed+by+RNA-seq'
                   '&assay_term_name=CRISPR+genome+editing+followed+by+RNA-seq'
                   '&assay_term_name=siRNA+knockdown+followed+by+RNA-seq'
                   '&assay_term_name=single+cell+isolation+followed+by+RNA-seq'
+                  '&assay_term_name=PAS-seq'
                   '&frame=embedded'
                   '&format=json'
-                  '&limit=10')
+                  '&limit=all')
 EXPERIMENT_SEARCH_URL = (
     '/search/?status=released'
     '&type=Experiment'
@@ -50,6 +54,7 @@ EXPERIMENT_SEARCH_URL = (
     '&assay_term_name=CRISPR+genome+editing+followed+by+RNA-seq'
     '&assay_term_name=siRNA+knockdown+followed+by+RNA-seq'
     '&assay_term_name=single+cell+isolation+followed+by+RNA-seq'
+    '&assay_term_name=PAS-seq'
     '&frame=embedded'
     '&format=json'
     '&limit=all')
@@ -203,8 +208,17 @@ def build_record_of_correlation_metrics_from_madqc_obj(
         from same experiment.
     """
     # first check things that result in error, to fail as fast as possible.
-    file1_meta = file_to_experiment_mapping[madqc_obj['quality_metric_of'][0]]
-    file2_meta = file_to_experiment_mapping[madqc_obj['quality_metric_of'][1]]
+    try:
+        file1_meta = file_to_experiment_mapping[madqc_obj['quality_metric_of'][
+            0]]
+        file2_meta = file_to_experiment_mapping[madqc_obj['quality_metric_of'][
+            1]]
+    except KeyError:
+        logger.warning('{} and/or {} not in lookup mapping'.format(
+            madqc_obj['quality_metric_of'][0], madqc_obj['quality_metric_of'][
+                1]))
+        return None
+
     assert file1_meta['experiment_accession'] == file2_meta[
         'experiment_accession'], 'Mismatch in experiment accession.'
     assert file1_meta['assembly'] == file2_meta[
@@ -231,7 +245,10 @@ def build_record_of_correlation_metrics_from_madqc_obj(
         logger.warning('{} and {} lack FPKM'.format(madqc_obj[
             'quality_metric_of'][0], madqc_obj['quality_metric_of'][1]))
         return None
-
+    correlation_record['number_of_genes_detected'] = [
+        sum(quants1['TPM'] > 1),
+        sum(quants2['TPM'] > 1)
+    ]
     del quants1
     del quants2
     neitherzero = (fpkm1 != 0) & (fpkm2 != 0)
@@ -285,7 +302,7 @@ if __name__ == '__main__':
 
     dictConfig(logger_config)
     logger = logging.getLogger(__name__)
-
+    nthreads = int(sys.argv[1])
     logger.info('Getting madQC metadata objects.')
     mad_request = requests.get(ENCODE_BASE_URL + MAD_SEARCH_URL)
     mad_request.raise_for_status()
@@ -300,13 +317,30 @@ if __name__ == '__main__':
     logger.info(
         'Built mapping for {} files'.format(len(file_to_experiment_lookup)))
     results = []
+    mad_graph = mad_data['@graph']
     logger.info('Start building correlation report.')
     before = time.time()
-    for mad_token in mad_data['@graph']:
-        logger.info('Processing token {}'.format(mad_token['@id']))
-        results.append(
-            build_record_of_correlation_metrics_from_madqc_obj(
-                mad_token, file_to_experiment_lookup))
+
+    def worker():
+        while True:
+            try:
+                token = mad_graph.pop()
+            except IndexError:
+                # done
+                break
+            logger.info('Handling {}'.format(token['@id']))
+            results.append(
+                build_record_of_correlation_metrics_from_madqc_obj(
+                    token, file_to_experiment_lookup))
+    threads = []
+    for _ in range(nthreads):
+        t = threading.Thread(target=worker)
+        t.start()
+        threads.append(t)
+
+    for process in threads:
+        process.join()
+
     after = time.time()
     logger.info('Built report. It took {}'.format(after - before))
     results = [result for result in results if result is not None]
