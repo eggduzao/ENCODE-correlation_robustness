@@ -28,6 +28,7 @@ import scipy.stats
 import json
 import logging
 from logging.config import dictConfig
+import time
 
 ENCODE_BASE_URL = 'https://www.encodeproject.org'
 MAD_SEARCH_URL = ('/search/?type=MadQualityMetric'
@@ -39,7 +40,7 @@ MAD_SEARCH_URL = ('/search/?type=MadQualityMetric'
                   '&assay_term_name=single+cell+isolation+followed+by+RNA-seq'
                   '&frame=embedded'
                   '&format=json'
-                  '&limit=all')
+                  '&limit=10')
 EXPERIMENT_SEARCH_URL = (
     '/search/?status=released'
     '&type=Experiment'
@@ -89,7 +90,6 @@ def build_file_to_experiment_data_mapping(experiment_data_dict):
 
     Args:
         experiment_data_dict: dict that contains experiment metadata.
-        logger: where to send the logs
 
     Returns:
         Lookup mapping with keys of format '/files/<file_accession>',
@@ -145,7 +145,7 @@ def get_pearson(arr1, arr2):
 def get_spearman(arr1, arr2):
     """Calculate spearman correlation
     """
-    return scipy.stats.spearman(arr1, arr2)[0]
+    return scipy.stats.spearmanr(arr1, arr2)[0]
 
 
 def get_log2_mean(arr1, arr2):
@@ -224,8 +224,14 @@ def build_record_of_correlation_metrics_from_madqc_obj(
     quants2 = pd.read_csv(
         base_url + madqc_obj['quality_metric_of'][1] + '@@download', sep='\t')
     # calculate filters for various conditions
-    fpkm1 = quants1['FPKM']
-    fpkm2 = quants2['FPKM']
+    try:
+        fpkm1 = quants1['FPKM']
+        fpkm2 = quants2['FPKM']
+    except KeyError:
+        logger.warning('{} and {} lack FPKM'.format(madqc_obj[
+            'quality_metric_of'][0], madqc_obj['quality_metric_of'][1]))
+        return None
+
     del quants1
     del quants2
     neitherzero = (fpkm1 != 0) & (fpkm2 != 0)
@@ -290,6 +296,19 @@ if __name__ == '__main__':
     experiment_data = experiment_request.json()
     logger.info('Building file -> experiment lookup mapping.')
     file_to_experiment_lookup = build_file_to_experiment_data_mapping(
-        experiment_data, logger)
+        experiment_data)
     logger.info(
         'Built mapping for {} files'.format(len(file_to_experiment_lookup)))
+    results = []
+    logger.info('Start building correlation report.')
+    before = time.time()
+    for mad_token in mad_data['@graph']:
+        logger.info('Processing token {}'.format(mad_token['@id']))
+        results.append(
+            build_record_of_correlation_metrics_from_madqc_obj(
+                mad_token, file_to_experiment_lookup))
+    after = time.time()
+    logger.info('Built report. It took {}'.format(after - before))
+    results = [result for result in results if result is not None]
+    result_df = pd.DataFrame(results)
+    result_df.to_csv('mad_10_test.tsv', sep='\t')
