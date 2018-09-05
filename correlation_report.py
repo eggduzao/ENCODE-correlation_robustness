@@ -201,7 +201,9 @@ def build_record_of_correlation_metrics_from_madqc_obj(
                 from. In case of mismatch between files, raise
                 AssertionError.
             'replication_type' : isogenic or anisogenic,
-            'biosample_type' : Biosample type of experiment
+            'biosample_type' : Biosample type of experiment,
+            'number_of_genes_detected' : [# of genes TPM > 1 in file1,
+                                          # of genes TPM > 1 in file2]
             }
     Raises:
         AssertionError if assemblies of files are not equal or files are not
