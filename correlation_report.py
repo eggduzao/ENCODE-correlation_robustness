@@ -159,21 +159,52 @@ def get_log2_mean(arr1, arr2):
     return (np.log2(arr1) + np.log2(arr2)) / 2.0
 
 
+def get_tsv(url, retries_loading_tsv):
+    """Load tsv into DataFrame.
+
+    Args:
+        url: string location of the tsv file
+        retries_loading_tsv: how many times to retry before giving up and
+            returning None
+
+    Returns:
+        pandas.DataFrame if all went well, None if retries_loading_tsv
+        are exhausted.
+    """
+    for attempt in range(retries_loading_tsv):
+        try:
+            tsv = pd.read_csv(url, sep='\t')
+        except:
+            logger.exception('Attempt {} failed when loading first tsv in {}.'.
+                             format(attempt, url))
+        else:
+            break
+    else:
+        # all attempts failed
+        logger.warning('Failure in loading tsv {}. Skipping.'.format(url))
+        return None
+    return tsv
+
+
 def build_record_of_correlation_metrics_from_madqc_obj(
         madqc_obj,
         file_to_experiment_mapping,
-        base_url='https://www.encodeproject.org'):
+        base_url='https://www.encodeproject.org',
+        retries_loading_tsv=5):
     """Take one madqc dict, and calculate correlation metric dict.
 
     Args:
         madqc_obj: dict containing a madQC object,
         file_to_experiment_mapping: dict built by
             build_file_to_experiment_data_mapping.,
-        base_url
+        base_url: base url
+        retries_loading_tsv: max times to retry loading tsvs before
+            giving up and returning None
 
     Returns:
         Dict with following structure:
             {
+            'mad_id' : id of the madQC object
             'quality_metric_of': [file1, file2],
             'current_pearson' : pearson correlation from madQC,
             'current_spearman' : spearman correlation from madQC,
@@ -204,6 +235,8 @@ def build_record_of_correlation_metrics_from_madqc_obj(
             'biosample_type' : Biosample type of experiment,
             'number_of_genes_detected' : [# of genes TPM > 1 in file1,
                                           # of genes TPM > 1 in file2]
+            'file1_log2_mean_gt_0' : how many genes from file 1 make the cut
+            'file2_log2_mean_gt_0' : how many genes from file 2 make the cut
             }
     Raises:
         AssertionError if assemblies of files are not equal or files are not
@@ -216,7 +249,7 @@ def build_record_of_correlation_metrics_from_madqc_obj(
         file2_meta = file_to_experiment_mapping[madqc_obj['quality_metric_of'][
             1]]
     except KeyError:
-        logger.warning('{} and/or {} not in lookup mapping'.format(
+        logger.exception('{} and/or {} not in lookup mapping'.format(
             madqc_obj['quality_metric_of'][0], madqc_obj['quality_metric_of'][
                 1]))
         return None
@@ -226,6 +259,7 @@ def build_record_of_correlation_metrics_from_madqc_obj(
     assert file1_meta['assembly'] == file2_meta[
         'assembly'], 'Mismatch in assembly.'
     correlation_record = dict()
+    correlation_record['mad_id'] = madqc_obj['@id']
     correlation_record['quality_metric_of'] = madqc_obj['quality_metric_of']
     correlation_record['current_pearson'] = madqc_obj['Pearson correlation']
     correlation_record['current_spearman'] = madqc_obj['Spearman correlation']
@@ -234,17 +268,26 @@ def build_record_of_correlation_metrics_from_madqc_obj(
         'experiment_accession']
     correlation_record['replication_type'] = file1_meta['replication_type']
     correlation_record['biosample_type'] = file1_meta['biosample_type']
+
     # that is all that can be done 'offline', get the actual files now.
-    quants1 = pd.read_csv(
-        base_url + madqc_obj['quality_metric_of'][0] + '@@download', sep='\t')
-    quants2 = pd.read_csv(
-        base_url + madqc_obj['quality_metric_of'][1] + '@@download', sep='\t')
+    quants1 = get_tsv(
+        base_url + madqc_obj['quality_metric_of'][0] + '@@download',
+        retries_loading_tsv)
+    quants2 = get_tsv(
+        base_url + madqc_obj['quality_metric_of'][1] + '@@download',
+        retries_loading_tsv)
+
+    if (quants1 is None) or (quants2 is None):
+        logger.warning('Getting tsvs for {} failed. Will be omitted.'.format(
+            madqc_obj['@id']))
+        return None
+
     # calculate filters for various conditions
     try:
         fpkm1 = quants1['FPKM']
         fpkm2 = quants2['FPKM']
     except KeyError:
-        logger.warning('{} and {} lack FPKM'.format(madqc_obj[
+        logger.exception('{} and {} lack FPKM'.format(madqc_obj[
             'quality_metric_of'][0], madqc_obj['quality_metric_of'][1]))
         return None
     correlation_record['number_of_genes_detected'] = [
@@ -266,13 +309,34 @@ def build_record_of_correlation_metrics_from_madqc_obj(
     quantile_01 = get_min_quantile_value(fpkm1_log2, fpkm2_log2, 0.999)
     quantile_1 = get_min_quantile_value(fpkm1_log2, fpkm2_log2, 0.99)
     quantile_10 = get_min_quantile_value(fpkm1_log2, fpkm2_log2, 0.9)
-    quantile_01_condition = (fpkm1_log2 > quantile_01) | (fpkm2_log2 >
+    quantile_01_condition = (fpkm1_log2 < quantile_01) | (fpkm2_log2 <
                                                           quantile_01)
-    quantile_1_condition = (fpkm1_log2 > quantile_1) | (fpkm2_log2 >
+    quantile_1_condition = (fpkm1_log2 < quantile_1) | (fpkm2_log2 <
                                                         quantile_1)
-    quantile_10_condition = (fpkm1_log2 > quantile_10) | (fpkm2_log2 >
+    quantile_10_condition = (fpkm1_log2 < quantile_10) | (fpkm2_log2 <
                                                           quantile_10)
     log2_mean_gt_0 = log2_mean > 0
+
+    correlation_record['file1_log2_mean_gt_0'] = len(
+        fpkm1_log2[log2_mean_gt_0])
+    correlation_record['file2_log2_mean_gt_0'] = len(
+        fpkm2_log2[log2_mean_gt_0])
+
+    correlation_record['file1_gt_0_and_01_quantile'] = len(
+        fpkm1_log2[log2_mean_gt_0 & quantile_01_condition])
+    correlation_record['file2_gt_0_and_01_quantile'] = len(
+        fpkm2_log2[log2_mean_gt_0 & quantile_01_condition])
+
+    correlation_record['file1_gt_0_and_1_quantile'] = len(
+        fpkm1_log2[log2_mean_gt_0 & quantile_1_condition])
+    correlation_record['file2_gt_0_and_1_quantile'] = len(
+        fpkm2_log2[log2_mean_gt_0 & quantile_1_condition])
+
+    correlation_record['file1_gt_0_and_10_quantile'] = len(
+        fpkm1_log2[log2_mean_gt_0 & quantile_10_condition])
+    correlation_record['file2_gt_0_and_10_quantile'] = len(
+        fpkm2_log2[log2_mean_gt_0 & quantile_10_condition])
+
     correlation_record['FPKM_log2_mean_gt_0_pearson'] = get_pearson(
         fpkm1_log2[log2_mean_gt_0], fpkm2_log2[log2_mean_gt_0])
     correlation_record['FPKM_log2_mean_gt_0_spearman'] = get_spearman(
@@ -334,6 +398,7 @@ if __name__ == '__main__':
             results.append(
                 build_record_of_correlation_metrics_from_madqc_obj(
                     token, file_to_experiment_lookup))
+
     threads = []
     for _ in range(nthreads):
         t = threading.Thread(target=worker)
@@ -347,4 +412,4 @@ if __name__ == '__main__':
     logger.info('Built report. It took {}'.format(after - before))
     results = [result for result in results if result is not None]
     result_df = pd.DataFrame(results)
-    result_df.to_csv('mad_10_test.tsv', sep='\t')
+    result_df.to_csv('mad_final.tsv', sep='\t')
